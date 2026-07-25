@@ -20,6 +20,10 @@ TEMPLATE = """#!/bin/bash
 # that periodic-image distances are meaningful. Do not point this at the
 # PBC-corrected trajectory produced by the main pipeline.
 #
+# Uses GROMACS's own inherent default groups (0=System, 1=Protein), no -n,
+# for the same reason the whole-trajectory PBC chain does: supplying -n
+# replaces gmx's automatic classification rather than adding to it.
+#
 # Submit with: sbatch {script_name}
 # Edit the SBATCH header for your allocation before submitting.
 #SBATCH -A {account}
@@ -33,7 +37,6 @@ set -euo pipefail
 
 GMX="{gmx}"
 TPR="{tpr}"
-NDX="{ndx}"
 GROUP="{group}"
 CUTDOWN_PS={cutdown_ps:g}
 DISTANCE_NM={distance_nm:g}
@@ -43,10 +46,10 @@ OUTPUT="{output}"
 
 {concat_block}
 
-echo "SYSTEM" | "$GMX" trjconv -f "$RAW_COMBINED" -s "$TPR" -n "$NDX" \\
+echo "0" | "$GMX" trjconv -f "$RAW_COMBINED" -s "$TPR" \\
     -o "$RAW_REDUCED" -dt "$CUTDOWN_PS" -quiet
 
-echo "$GROUP" | "$GMX" mindist -f "$RAW_REDUCED" -s "$TPR" -n "$NDX" \\
+echo "$GROUP" | "$GMX" mindist -f "$RAW_REDUCED" -s "$TPR" \\
     -od "$OUTPUT" -d "$DISTANCE_NM" -pi
 
 rm -f "$RAW_COMBINED" "$RAW_REDUCED"
@@ -60,13 +63,12 @@ def write_mindist_script(
     gmx: str,
     entries: list[TrajectoryEntry],
     reference_tpr: Path,
-    index_file: Path,
     cutdown_ps: float,
     script_path: Path,
     account: str = "naiss2025-3-21",
     walltime: str = "01:00:00",
     distance_nm: float = 1.2,
-    group: str = "PROTEIN",
+    group: str = "1",  # gmx inherent default: 1 = Protein
 ) -> Path:
     header("Writing mindist submission script")
 
@@ -95,7 +97,6 @@ def write_mindist_script(
             walltime=walltime,
             gmx=gmx,
             tpr=str(reference_tpr),
-            ndx=str(index_file),
             group=group,
             cutdown_ps=cutdown_ps,
             distance_nm=distance_nm,

@@ -262,6 +262,10 @@ def setting(
 
 
 def require_file(path: Path, description: str) -> None:
+    from .gmx import DRY_RUN_ACTIVE
+
+    if DRY_RUN_ACTIVE():
+        return
     if not path.is_file():
         raise ConfigError(f"{description} not found: {path}")
 

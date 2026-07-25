@@ -77,9 +77,21 @@ Three conventions remove most of the boilerplate:
 - **`REMOVE_INITIAL_PS` is auto-detected** from the matching `.mdp` as
   `dt x nstxout-compressed` (e.g. `0.002 x 5000 = 10 ps`). Set the key
   explicitly to override.
-- **PBC groups are selected by name** (`SYSTEM`, `PROTEIN`) from the generated
-  index, so no group-number settings exist and the default GROMACS numbering
-  is never assumed.
+- **`--write-example` auto-detects** `step7_production_??.xtc` in the current
+  directory and writes one `TRAJIN` line per segment in order, with placeholder
+  lengths of 100 ns (last = 0). Verify the lengths before running.
+
+## Index-file scoping
+
+Whole-system steps (concatenation, the `-pbc whole` / `cluster` / `mol` chain,
+`-center -fit`, and the full-trajectory downsample) use GROMACS's own inherent
+default groups with **no** `-n`: `0 = System`, `1 = Protein`. Supplying an index
+file *replaces* gmx's automatic classification rather than adding to it, which
+breaks `-pbc cluster` on systems containing lone-pair/dummy atoms.
+
+The custom `gpcr_only.ndx` is used **only** for per-`TRAJOUT` extraction and the
+`RECEPTOR_HELICES_CA` fit, where the required selections don't exist as gmx
+defaults.
 
 ## What gets written
 
@@ -89,8 +101,22 @@ Three conventions remove most of the boilerplate:
 | `trajectory_groups.json` | manifest linking each `TRAJOUT` to its group |
 | `step7_production_combined.xtc` | concatenated, time-shifted |
 | `step7_production_pbc_fit.xtc` | PBC-corrected, centred, fitted |
-| `<slug>.pdb`, `traj_<slug>*.xtc` | one set per `TRAJOUT` |
+| `modifyGMXtraj.log` | full run log |
+| `traj_fit.xtc`, `traj_fit_200ps.xtc` | the `MAIN` products |
+| `<slug>.pdb`, `traj_<slug>*.xtc` | one set per other `TRAJOUT` |
 | `run_mindist.sh` | submit separately |
+
+`MAIN` drops its slug from the fitted products (`traj_fit.xtc` rather than
+`traj_main_fit.xtc`) since it's the primary output; every other selection keeps
+its slug so files stay distinguishable.
+
+## Logging
+
+Every run writes `modifyGMXtraj.log` (override with `LOG_FILE` or `--log`,
+disable with `--no-log`) containing the verbatim input file, every resolved
+parameter, each GROMACS command with its selections, and an inventory of files
+written with sizes. GROMACS's own output streams to the terminal by default;
+`LOG_GMX_OUTPUT = yes` routes it into the log instead.
 
 ## Why mindist is a separate script
 
@@ -114,7 +140,8 @@ This is deliberately a GPCR-only tool.
   no lab-frame output. Area-per-lipid, lateral diffusion and MSD need a
   separate `-pbc nojump` pass.
 - Segment lengths in `TRAJIN` are trusted, not verified against the actual
-  trajectory duration.
+  trajectory duration (including the placeholder lengths `--write-example`
+  emits).
 - The lipid heuristic (>=12 C and >=15 heavy atoms) will absorb undeclared
   cofactors such as GTP or heme into `LIPIDS`. Read the warnings.
 
@@ -127,6 +154,7 @@ modifygmxtraj/
 ├── gmx.py       GROMACS invocation helpers
 ├── pipeline.py  concatenation, PBC correction, TRAJOUT extraction
 ├── mindist.py   mindist script generation
+├── runlog.py    run logging and file inventory
 └── cli.py       argument parsing and the -h reference
 ```
 
