@@ -1,0 +1,45 @@
+# ---------------------------------------------------------------------------
+# modify_traj.py configuration -- GPCR trajectory post-processing
+#
+# TRAJIN = <xtc> <length_ns>
+#   The .tpr is inferred as <xtc stem>.tpr. The last entry must use 0.
+#   REMOVE_INITIAL_PS is auto-detected per segment from the matching .mdp
+#   (dt * nstxout-compressed). Set REMOVE_INITIAL_PS below to override.
+# ---------------------------------------------------------------------------
+
+GMX = gmx_mpi
+PYTHON = python3
+
+TRAJIN = step7_production_01.xtc 100
+TRAJIN = step7_production_02.xtc 100
+TRAJIN = step7_production_03.xtc 0
+
+STRUCTURE_FILE = step6.7_equilibration.gro
+
+MAIN_RESIDUES = 298
+LIGANDS = LIG
+GPROTEIN = NONE
+LIPIDS = POPC CHL1
+
+TRAJOUT = MAIN 200
+TRAJOUT = COMPLEX 200
+TRAJOUT = MAIN+LIPIDS 200
+TRAJOUT = MAIN+GPROTEIN+LIPIDS 200
+
+MINDIST_CUTDOWN_PS = 1000
+
+# Optional overrides (defaults shown; uncomment only if needed)
+# REMOVE_INITIAL_PS      = 10
+# REFERENCE_TPR          = step7_production_01.tpr
+# INDEX_GENERATOR        = make_ndx.py
+# INDEX_FILE             = gpcr_only.ndx
+# INDEX_MANIFEST         = trajectory_groups.json
+# MIN_HELIX_LENGTH       = 3
+# EXTRA_VIRTUAL_NAMES    = NONE
+# COMBINED_OUTPUT        = step7_production_combined.xtc
+# FULL_OUTPUT            = step7_production_pbc_fit.xtc
+# FULL_CUTDOWN_PS        = 1000            ; 0 disables the reduced full traj
+# DEFAULT_TRAJOUT_CUTDOWN_PS = 200
+# GENERATE_MINDIST_SCRIPT = yes
+# MINDIST_SCRIPT         = run_mindist.sh
+# REMOVE_TEMPORARY       = yes

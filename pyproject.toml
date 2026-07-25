@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "modifyGMXtraj"
+version = "0.1.0"
+description = "GROMACS trajectory post-processing pipeline for GPCR simulations"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Midhun Mohan Anila"}]
+keywords = ["gromacs", "molecular-dynamics", "gpcr", "trajectory", "mdtraj"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Intended Audience :: Science/Research",
+]
+dependencies = [
+    "mdtraj>=1.9.7",
+    "numpy>=1.21",
+]
+
+[project.scripts]
+modifyGMXtraj = "modifygmxtraj.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/midhunkmadhu/modifyGMXtraj"
+
+[tool.setuptools.packages.find]
+include = ["modifygmxtraj*"]

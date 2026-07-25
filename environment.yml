@@ -1,0 +1,13 @@
+# conda env create -f environment.yml && conda activate modifygmxtraj
+# mdtraj is installed from conda-forge, not pip: the pip wheel needs a
+# compiler toolchain and often fails on HPC login nodes.
+name: modifygmxtraj
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10
+  - mdtraj>=1.9.7
+  - numpy>=1.21
+  - pip
+  - pip:
+      - -e .
