@@ -10,7 +10,7 @@ behaviour is driven by one plain-text input file.
 ## Installation
 
 ```bash
-git clone https://github.com/midhunkmadhu/modifyGMXtraj.git
+git clone https://github.com/<your-user>/modifyGMXtraj.git
 cd modifyGMXtraj
 conda env create -f environment.yml
 conda activate modifygmxtraj
@@ -99,8 +99,9 @@ defaults.
 |---|---|
 | `gpcr_only.ndx` | all index groups |
 | `trajectory_groups.json` | manifest linking each `TRAJOUT` to its group |
-| `step7_production_combined.xtc` | concatenated, time-shifted |
-| `step7_production_pbc_fit.xtc` | PBC-corrected, centred, fitted |
+| `combined.xtc` | concatenated, time-shifted |
+| `pbc_fit.xtc` | PBC-corrected, centred, fitted |
+| `pbc_fit_1000ps.xtc` | reduced full trajectory |
 | `modifyGMXtraj.log` | full run log |
 | `traj_fit.xtc`, `traj_fit_200ps.xtc` | the `MAIN` products |
 | `<slug>.pdb`, `traj_<slug>*.xtc` | one set per other `TRAJOUT` |
@@ -109,6 +110,13 @@ defaults.
 `MAIN` drops its slug from the fitted products (`traj_fit.xtc` rather than
 `traj_main_fit.xtc`) since it's the primary output; every other selection keeps
 its slug so files stay distinguishable.
+
+Output names are deliberately generic and never encode the input filename. An
+earlier version defaulted to `step7_production_*`, which mislabelled runs on
+equilibration trajectories and — worse — meant that later processing the real
+production trajectory in the same directory silently overwrote the earlier
+results. Keep separate runs in separate directories, or set `COMBINED_OUTPUT`
+and `FULL_OUTPUT` explicitly.
 
 ## Logging
 
