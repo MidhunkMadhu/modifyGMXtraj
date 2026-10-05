@@ -35,6 +35,11 @@ TRAJOUT = MAIN 200
 TRAJOUT = MAIN+LIPIDS 200
 
 MINDIST_CUTDOWN_PS = 1000
+
+# Speed (optional). auto skips frames no output needs; note that pbc_fit.xtc and
+# the unreduced traj_*.xtc are then at that coarser interval.
+# EARLY_CUTDOWN_PS = auto
+# PARALLEL_JOBS    = 4        ; request the same number of SLURM cores
 """
 
 
@@ -194,7 +199,7 @@ LOGGING
 
 SPEED (all optional; the defaults reproduce the original sequential run)
 -----
-  EARLY_CUTDOWN_PS = 0             0 = off. When > 0, the first PBC pass keeps
+  EARLY_CUTDOWN_PS = 0 | auto      0 = off. When > 0, the first PBC pass keeps
                                    only frames every EARLY_CUTDOWN_PS ps (-dt),
                                    so every later pass and every TRAJOUT step
                                    handles fewer frames. The PBC treatment of each
@@ -205,6 +210,11 @@ SPEED (all optional; the defaults reproduce the original sequential run)
                                    multiple of it (checked before anything runs).
                                    E.g. native 100 ps frames, outputs at 200/1000
                                    ps: EARLY_CUTDOWN_PS = 200 halves the work.
+                                   'auto' reads the frame interval from the xtc
+                                   files and picks the largest interval every
+                                   output is a multiple of, or stays off when
+                                   nothing can be skipped; the choice and the
+                                   reason are written to the run log.
 
   PARALLEL_JOBS = 1                Run the reduced full trajectory and the TRAJOUT
                                    sets (which only read FULL_OUTPUT) this many at a

@@ -58,6 +58,7 @@ CPU. Three optional keys (defaults keep the original behaviour):
 | key | effect |
 |---|---|
 | `EARLY_CUTDOWN_PS = 200` | keep only every 200 ps from the first PBC pass on; with 100 ps input and outputs at 200/1000 ps this halves the work. Output intervals must be multiples of it. |
+| `EARLY_CUTDOWN_PS = auto` | read the frame interval from the xtc files and pick the largest interval every output is a multiple of (off when nothing can be skipped); the choice is logged. |
 | `PARALLEL_JOBS = 4` | build the reduced full trajectory and the TRAJOUT sets concurrently; request the same number of cores. |
 | `TEMPORARY_DIR = /path` | where the large intermediate files go. |
 

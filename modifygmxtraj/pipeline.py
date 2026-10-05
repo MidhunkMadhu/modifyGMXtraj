@@ -26,7 +26,15 @@ from .config import (
     trajectory_start_times,
 )
 from . import gmx as gmx_module
-from .gmx import check_executable, gmx_command, header, run, set_capture, xtc_atom_count
+from .gmx import (
+    check_executable,
+    gmx_command,
+    header,
+    run,
+    set_capture,
+    xtc_atom_count,
+    xtc_frame_interval_ps,
+)
 from .indexer import build_index
 from .mindist import write_mindist_script
 from .runlog import RunLog
@@ -142,6 +150,64 @@ def run_tasks(tasks: list[Callable[[], T]], n_jobs: int) -> list[T]:
     finally:
         sys.stdout = saved_stdout
         set_capture(saved_capture)
+
+
+def _to_units(ps: float) -> int:
+    """ps -> integer units of 0.001 ps, so interval arithmetic is exact."""
+    return int(round(ps * 1000))
+
+
+def auto_early_cutdown(
+    trajectories: list[TrajectoryEntry],
+    output_intervals: list[float],
+) -> tuple[float, str]:
+    """EARLY_CUTDOWN_PS = auto: the coarsest interval that still yields every
+    requested output, if it is coarser than the frames actually written.
+
+    native   = the frame interval of the TRAJIN xtcs (read from the files;
+               if segments differ, their least common multiple)
+    coarsest = greatest common divisor of every TRAJOUT cutdown and
+               FULL_CUTDOWN_PS
+    The early cutdown is `coarsest` when it is a multiple of `native` and
+    larger than it; otherwise it stays off (nothing could be skipped safely).
+    Returns (value in ps, explanation for the log).
+    """
+    import math
+
+    natives: list[int] = []
+    for entry in trajectories:
+        interval = xtc_frame_interval_ps(entry.trajectory)
+        if interval is None or interval <= 0:
+            return 0.0, f"off: could not read a frame interval from {entry.trajectory}"
+        natives.append(_to_units(interval))
+    native = natives[0]
+    for value in natives[1:]:
+        native = native * value // math.gcd(native, value)
+
+    targets = [_to_units(v) for v in output_intervals if v > 0]
+    if not targets:
+        return 0.0, "off: no downsampled outputs requested"
+    coarsest = targets[0]
+    for value in targets[1:]:
+        coarsest = math.gcd(coarsest, value)
+
+    native_ps, coarsest_ps = native / 1000, coarsest / 1000
+    if coarsest % native != 0:
+        return 0.0, (
+            f"off: output intervals (common divisor {coarsest_ps:g} ps) are not "
+            f"multiples of the {native_ps:g} ps frame interval"
+        )
+    if coarsest == native:
+        return 0.0, (
+            f"off: frames are written every {native_ps:g} ps and the output "
+            f"intervals only share that {native_ps:g} ps step, so no frame can be "
+            "skipped"
+        )
+    return coarsest_ps, (
+        f"{coarsest_ps:g} ps (frames written every {native_ps:g} ps; every output "
+        f"interval is a multiple of {coarsest_ps:g} ps), so 1 in "
+        f"{coarsest // native} frames is processed"
+    )
 
 
 def check_multiple_of(value: float, base: float, key: str) -> None:
@@ -569,9 +635,19 @@ def _run(
     )
 
     # ---- speed settings (all default to the original sequential behaviour)
-    early_cutdown_ps = parse_nonnegative_float(
-        setting(settings, "EARLY_CUTDOWN_PS", "0"), "EARLY_CUTDOWN_PS"
-    )
+    early_setting = setting(settings, "EARLY_CUTDOWN_PS", "0").strip()
+    if early_setting.lower() == "auto":
+        early_cutdown_ps, early_note = auto_early_cutdown(
+            trajectories,
+            [request.cutdown_ps for request in output_requests] + [full_cutdown_ps],
+        )
+        early_note = f"auto -> {early_note}"
+    else:
+        early_cutdown_ps = parse_nonnegative_float(early_setting, "EARLY_CUTDOWN_PS")
+        early_note = (
+            f"{early_cutdown_ps:g} (FULL_OUTPUT and extracted XTCs at this interval)"
+            if early_cutdown_ps > 0 else "0 (disabled; every frame kept)"
+        )
     if early_cutdown_ps > 0:
         for request in output_requests:
             check_multiple_of(
@@ -621,11 +697,7 @@ def _run(
         ("SLURM_ACCOUNT", slurm_account),
         ("REMOVE_TEMPORARY", remove_temporary),
         ("LOG_GMX_OUTPUT", log_gmx_output),
-        (
-            "EARLY_CUTDOWN_PS",
-            f"{early_cutdown_ps:g} (FULL_OUTPUT and extracted XTCs at this interval)"
-            if early_cutdown_ps > 0 else "0 (disabled; every frame kept)",
-        ),
+        ("EARLY_CUTDOWN_PS", early_note),
         ("PARALLEL_JOBS", parallel_jobs),
         ("TEMPORARY_DIR", temporary_dir if temporary_dir is not None else "(next to inputs / working dir)"),
         ("SLURM_PARTITION (mindist)", slurm_partition),

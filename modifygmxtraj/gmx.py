@@ -127,3 +127,14 @@ def xtc_atom_count(xtc: Path) -> int:
     if xyz.shape[0] == 0:
         raise ConfigError(f"{xtc} contains no frames")
     return int(xyz.shape[1])
+
+
+def xtc_frame_interval_ps(xtc: Path) -> Optional[float]:
+    """Time between the first two frames of an xtc, in ps (None if < 2 frames)."""
+    from mdtraj.formats import XTCTrajectoryFile
+
+    with XTCTrajectoryFile(str(xtc)) as handle:
+        _xyz, time, _step, _box = handle.read(n_frames=2)
+    if len(time) < 2:
+        return None
+    return float(time[1] - time[0])
