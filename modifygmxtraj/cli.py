@@ -17,8 +17,8 @@ EXAMPLE_HEADER = """\
 #
 # TRAJIN = <xtc> <length_ns>   -- the .tpr is inferred as <xtc stem>.tpr
 #                                 the LAST entry must use 0
-# REMOVE_INITIAL_PS is auto-detected from the matching .mdp
-# (dt x nstxout-compressed) unless set explicitly below.
+# With several segments, the overlapping first frame of every segment after
+# the first is trimmed automatically (dt x nstxout-compressed from its .mdp).
 # ---------------------------------------------------------------------------
 GMX = gmx_mpi
 """
