@@ -27,6 +27,8 @@ TEMPLATE = """#!/bin/bash
 # Submit with: sbatch {script_name}
 # Edit the SBATCH header for your allocation before submitting.
 #SBATCH -A {account}
+#SBATCH -p {partition}
+#SBATCH --mem={mem}
 #SBATCH -J mindist_{label}
 #SBATCH -t {walltime}
 #SBATCH -N 1
@@ -67,6 +69,8 @@ def write_mindist_script(
     script_path: Path,
     account: str = "naiss2025-3-21",
     walltime: str = "01:00:00",
+    partition: str = "shared",
+    mem: str = "8G",
     distance_nm: float = 1.2,
     group: str = "1",  # gmx inherent default: 1 = Protein
 ) -> Path:
@@ -94,6 +98,8 @@ def write_mindist_script(
             script_name=script_path.name,
             label=Path.cwd().name,
             account=account,
+            partition=partition,
+            mem=mem,
             walltime=walltime,
             gmx=gmx,
             tpr=str(reference_tpr),

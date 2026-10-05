@@ -48,6 +48,32 @@ sbatch run_mindist.sh                                   # separately
 
 `modifyGMXtraj --help` prints the complete input-file key reference.
 
+
+## Running faster
+
+Every step is a single-threaded `trjconv` pass over the trajectory, so the
+run time is dominated by reading and writing whole-system frames, not by
+CPU. Three optional keys (defaults keep the original behaviour):
+
+| key | effect |
+|---|---|
+| `EARLY_CUTDOWN_PS = 200` | keep only every 200 ps from the first PBC pass on; with 100 ps input and outputs at 200/1000 ps this halves the work. Output intervals must be multiples of it. |
+| `PARALLEL_JOBS = 4` | build the reduced full trajectory and the TRAJOUT sets concurrently; request the same number of cores. |
+| `TEMPORARY_DIR = /path` | where the large intermediate files go. |
+
+On clusters with whole-node partitions, use a shared/small partition: the
+tool needs one core per parallel job, e.g. on Dardel
+
+```bash
+#SBATCH -p shared
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4      # = PARALLEL_JOBS
+#SBATCH --mem=16gb
+```
+
+The biggest gain for many replicas is to submit one such job per run
+directory so they all run at the same time.
+
 ## Minimal input file
 
 ```

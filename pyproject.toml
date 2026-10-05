@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "modifyGMXtraj"
-version = "0.3.0"
+version = "0.4.0"
 description = "GROMACS trajectory post-processing pipeline for GPCR simulations"
 readme = "README.md"
 requires-python = ">=3.10"

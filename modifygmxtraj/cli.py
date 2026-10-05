@@ -192,12 +192,40 @@ LOGGING
       streams to the terminal by default; LOG_GMX_OUTPUT = yes routes it
       through Python into the log instead, at the cost of live streaming.
 
+SPEED (all optional; the defaults reproduce the original sequential run)
+-----
+  EARLY_CUTDOWN_PS = 0             0 = off. When > 0, the first PBC pass keeps
+                                   only frames every EARLY_CUTDOWN_PS ps (-dt),
+                                   so every later pass and every TRAJOUT step
+                                   handles fewer frames. The PBC treatment of each
+                                   kept frame is unchanged, but FULL_OUTPUT and the
+                                   extracted/fitted TRAJOUT XTCs are then at this
+                                   interval, not the native one. Every TRAJOUT
+                                   cutdown and FULL_CUTDOWN_PS must be a whole
+                                   multiple of it (checked before anything runs).
+                                   E.g. native 100 ps frames, outputs at 200/1000
+                                   ps: EARLY_CUTDOWN_PS = 200 halves the work.
+
+  PARALLEL_JOBS = 1                Run the reduced full trajectory and the TRAJOUT
+                                   sets (which only read FULL_OUTPUT) this many at a
+                                   time. Each set is a chain of single-threaded
+                                   trjconv calls, so request as many SLURM cores as
+                                   jobs (e.g. --cpus-per-task=4 for 4). GROMACS
+                                   output is captured and printed per set while
+                                   they run concurrently.
+
+  TEMPORARY_DIR = <dir>            Where the trimmed/shifted segments and the three
+                                   whole-system PBC intermediates are written
+                                   (default: next to the inputs / working dir).
+
 MINDIST
 -------
   GENERATE_MINDIST_SCRIPT = yes
   MINDIST_SCRIPT          = run_mindist.sh
   MINDIST_CUTDOWN_PS      = 1000
   SLURM_ACCOUNT           = naiss2025-3-21
+  SLURM_PARTITION         = shared     mindist is one serial process; a shared
+  SLURM_MEM               = 8G         partition avoids billing a whole node
 
       Mindist is never run inline: it needs raw, unfitted coordinates, which
       the pipeline does not keep. A standalone sbatch script is written that

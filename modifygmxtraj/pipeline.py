@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import shutil
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar
 
 from .config import (
     ConfigError,
@@ -15,12 +18,14 @@ from .config import (
     parse_bool,
     parse_nonnegative_float,
     parse_positive_float,
+    parse_positive_int,
     read_config,
     remove_initial_ps_from_mdp,
     require_file,
     setting,
     trajectory_start_times,
 )
+from . import gmx as gmx_module
 from .gmx import check_executable, gmx_command, header, run, set_capture, xtc_atom_count
 from .indexer import build_index
 from .mindist import write_mindist_script
@@ -57,8 +62,97 @@ class OutputProduct:
     reduced_trajectory: Path
 
 
-def temporary_path(source: Path, label: str) -> Path:
-    return source.with_name(f"{source.stem}_{label}{source.suffix}")
+T = TypeVar("T")
+
+
+def temporary_path(source: Path, label: str, directory: Optional[Path] = None) -> Path:
+    name = f"{source.stem}_{label}{source.suffix}"
+    return directory / name if directory is not None else source.with_name(name)
+
+
+class _ThreadBufferedStdout:
+    """sys.stdout stand-in used while independent steps run in parallel.
+
+    Each worker thread's prints go to its own buffer, which is written out as
+    one block when the worker finishes, so the console and the run log show
+    every output set's commands together instead of interleaved line by line.
+    Threads without a buffer (the main thread) write straight through.
+    """
+
+    def __init__(self, stream) -> None:
+        self._stream = stream
+        self._local = threading.local()
+
+    def start(self) -> None:
+        self._local.buffer = []
+
+    def stop(self) -> str:
+        text = "".join(getattr(self._local, "buffer", None) or [])
+        self._local.buffer = None
+        return text
+
+    def write(self, text: str) -> int:
+        buffer = getattr(self._local, "buffer", None)
+        if buffer is not None:
+            buffer.append(text)
+            return len(text)
+        return self._stream.write(text)
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+    def __getattr__(self, name: str):
+        return getattr(self._stream, name)
+
+
+def run_tasks(tasks: list[Callable[[], T]], n_jobs: int) -> list[T]:
+    """Run independent pipeline steps, in parallel when n_jobs > 1.
+
+    Each step is a sequence of GROMACS subprocesses, so threads are enough:
+    the work happens in the child processes. GROMACS output is captured while
+    steps run concurrently (it would otherwise interleave on the terminal) and
+    printed with the rest of that step's block. Results come back in task
+    order; the first failure is raised after the other steps have finished.
+    """
+    if n_jobs <= 1 or len(tasks) <= 1:
+        return [task() for task in tasks]
+
+    saved_stdout = sys.stdout
+    saved_capture = gmx_module.CAPTURE
+    wrapper = _ThreadBufferedStdout(saved_stdout)
+    lock = threading.Lock()
+
+    def call(task: Callable[[], T]) -> T:
+        wrapper.start()
+        try:
+            return task()
+        finally:
+            text = wrapper.stop()
+            with lock:
+                saved_stdout.write(text)
+                saved_stdout.flush()
+
+    print(f"\nRunning {len(tasks)} independent steps with up to {n_jobs} in parallel", flush=True)
+    sys.stdout = wrapper  # type: ignore[assignment]
+    set_capture(True)
+    try:
+        with ThreadPoolExecutor(max_workers=n_jobs) as pool:
+            futures = [pool.submit(call, task) for task in tasks]
+            return [future.result() for future in futures]
+    finally:
+        sys.stdout = saved_stdout
+        set_capture(saved_capture)
+
+
+def check_multiple_of(value: float, base: float, key: str) -> None:
+    """Downsampling an already downsampled trajectory only works on multiples."""
+    ratio = value / base
+    if round(ratio) < 1 or abs(ratio - round(ratio)) > 1e-6:
+        raise ConfigError(
+            f"{key} = {value:g} ps is not a whole multiple of EARLY_CUTDOWN_PS = "
+            f"{base:g} ps; frames at that interval would not exist after the early "
+            "cutdown. Use a multiple, or lower EARLY_CUTDOWN_PS."
+        )
 
 
 def default_interval_filename(base: str, interval_ps: float) -> str:
@@ -83,6 +177,7 @@ def prepare_sequential_segments(
     gmx: str,
     entries: list[TrajectoryEntry],
     remove_initial_ps_override: Optional[float],
+    temporary_dir: Optional[Path] = None,
 ) -> tuple[list[Path], list[Path]]:
     header("Preparing sequential trajectory segments with manual time shifts")
 
@@ -114,8 +209,8 @@ def prepare_sequential_segments(
         else:
             trim_begin = remove_initial_ps_from_mdp(find_mdp_file(entry.trajectory))
 
-        trimmed = temporary_path(entry.trajectory, "trimmed")
-        shifted = temporary_path(entry.trajectory, "shifted")
+        trimmed = temporary_path(entry.trajectory, "trimmed", temporary_dir)
+        shifted = temporary_path(entry.trajectory, "shifted", temporary_dir)
 
         run(
             gmx_command(
@@ -163,28 +258,41 @@ def concatenate(gmx: str, inputs: list[Path], output: Path, log: RunLog) -> None
 
 
 def process_pbc(
-    gmx: str, combined: Path, reference_tpr: Path, output: Path, log: RunLog
+    gmx: str,
+    combined: Path,
+    reference_tpr: Path,
+    output: Path,
+    log: RunLog,
+    early_cutdown_ps: float = 0.0,
+    temporary_dir: Optional[Path] = None,
 ) -> list[Path]:
     """PBC correction on the WHOLE trajectory using gmx's inherent default
-    groups. No -n here by design; see the comment above PBC_WHOLE_GROUP."""
+    groups. No -n here by design; see the comment above PBC_WHOLE_GROUP.
+
+    With early_cutdown_ps > 0 the first pass keeps only frames at that
+    interval (-dt), so the three later passes and every TRAJOUT step handle
+    fewer frames. The PBC treatment of each kept frame is unchanged."""
     header("Applying PBC correction, centring and whole-system fitting")
     print("Using GROMACS inherent default groups (no -n): 0 = System, 1 = Protein")
+    if early_cutdown_ps > 0:
+        print(f"  early cutdown: only frames every {early_cutdown_ps:g} ps are kept from step 1 on")
     print("  step 1: -pbc whole      output System")
     print("  step 2: -pbc cluster    pivot Protein, output System")
     print("  step 3: -pbc mol        output System")
     print("  step 4: -center Protein, -fit rot+trans on Protein, output System")
 
-    whole = Path("temporary_pbc_whole.xtc")
-    clustered = Path("temporary_pbc_cluster.xtc")
-    molecule = Path("temporary_pbc_molecule.xtc")
+    directory = temporary_dir if temporary_dir is not None else Path(".")
+    whole = directory / "temporary_pbc_whole.xtc"
+    clustered = directory / "temporary_pbc_cluster.xtc"
+    molecule = directory / "temporary_pbc_molecule.xtc"
 
-    run(
-        gmx_command(
-            gmx, "trjconv", "-f", str(combined), "-s", str(reference_tpr),
-            "-o", str(whole), "-pbc", "whole",
-        ),
-        selections=[PBC_WHOLE_GROUP],
+    first_pass = gmx_command(
+        gmx, "trjconv", "-f", str(combined), "-s", str(reference_tpr),
+        "-o", str(whole), "-pbc", "whole",
     )
+    if early_cutdown_ps > 0:
+        first_pass.extend(["-dt", f"{early_cutdown_ps:g}"])
+    run(first_pass, selections=[PBC_WHOLE_GROUP])
     run(
         gmx_command(
             gmx, "trjconv", "-f", str(whole), "-s", str(reference_tpr),
@@ -231,100 +339,112 @@ def downsample(
     require_file(output, "Downsampled trajectory")
 
 
-def create_output_products(
+def _make_output_product(
+    gmx: str,
+    item: dict[str, Any],
+    full_trajectory: Path,
+    reference_tpr: Path,
+    structure_file: Path,
+    index_file: Path,
+    fit_group: str,
+) -> tuple[OutputProduct, list[tuple[str, Path]]]:
+    """Build one TRAJOUT set. Returns the product and its log records, so the
+    caller can record them in input order even when sets run in parallel."""
+    expression = str(item["expression"])
+    group_name = str(item["group"])
+    slug = str(item["slug"])
+    contains_receptor = bool(item["contains_receptor"])
+    cutdown_ps = float(item["cutdown_ps"])
+    records: list[tuple[str, Path]] = []
+
+    header(f"Creating output set: {expression}")
+    print(f"Index group      : {group_name} ({item.get('atom_count', '?')} atoms)")
+    print(f"Contains receptor: {contains_receptor}")
+    print(f"Cutdown interval : {cutdown_ps:g} ps")
+
+    structure_output = Path(f"{slug}.pdb")
+    trajectory_output = Path(f"traj_{slug}.xtc")
+
+    run(
+        gmx_command(
+            gmx, "trjconv", "-f", str(full_trajectory),
+            "-s", str(reference_tpr), "-n", str(index_file),
+            "-o", str(trajectory_output), "-quiet",
+        ),
+        selections=[group_name],
+    )
+    run(
+        gmx_command(
+            gmx, "trjconv", "-f", str(structure_file),
+            "-s", str(structure_file), "-n", str(index_file),
+            "-o", str(structure_output), "-quiet",
+        ),
+        selections=[group_name],
+    )
+
+    require_file(trajectory_output, f"{expression} trajectory")
+    require_file(structure_output, f"{expression} structure")
+    records.append((f"{expression} reference PDB", structure_output))
+    records.append((f"{expression} extracted XTC", trajectory_output))
+
+    fitted_name, reduced_name = product_filenames(slug, cutdown_ps)
+
+    if contains_receptor:
+        fitted_output: Optional[Path] = Path(fitted_name)
+        reduced_output = Path(reduced_name)
+        print(f"Fitting on {fit_group}; writing {fitted_output}")
+        run(
+            gmx_command(
+                gmx, "trjconv", "-f", str(full_trajectory),
+                "-s", str(reference_tpr), "-n", str(index_file),
+                "-o", str(fitted_output), "-fit", "rot+trans", "-quiet",
+            ),
+            selections=[fit_group, group_name],
+        )
+        require_file(fitted_output, f"Fitted {expression} trajectory")
+        downsample(
+            gmx, fitted_output, structure_output, reduced_output, cutdown_ps
+        )
+        records.append((f"{expression} helix-CA-fitted XTC", fitted_output))
+    else:
+        fitted_output = None
+        reduced_output = Path(
+            f"traj_{slug}_{format_interval(cutdown_ps)}ps.xtc"
+        )
+        print(f"{expression} has no receptor atoms; fitting skipped.")
+        downsample(
+            gmx, trajectory_output, structure_output, reduced_output, cutdown_ps
+        )
+
+    records.append((f"{expression} reduced XTC", reduced_output))
+    product = OutputProduct(
+        expression=expression,
+        structure=structure_output,
+        trajectory=trajectory_output,
+        fitted_trajectory=fitted_output,
+        reduced_trajectory=reduced_output,
+    )
+    return product, records
+
+
+def output_product_tasks(
     gmx: str,
     full_trajectory: Path,
     reference_tpr: Path,
     structure_file: Path,
     index_file: Path,
     manifest: dict[str, Any],
-    log: RunLog,
-) -> list[OutputProduct]:
-    outputs = manifest.get("outputs", [])
-    if not outputs:
-        return []
-
+) -> list[Callable[[], tuple[OutputProduct, list[tuple[str, Path]]]]]:
+    """One independent task per TRAJOUT set; they share only read-only inputs
+    and write distinct files, so they can run concurrently."""
     fit_group = str(manifest.get("receptor_fit_group", "RECEPTOR_HELICES_CA"))
-    products: list[OutputProduct] = []
-
-    for item in outputs:
-        expression = str(item["expression"])
-        group_name = str(item["group"])
-        slug = str(item["slug"])
-        contains_receptor = bool(item["contains_receptor"])
-        cutdown_ps = float(item["cutdown_ps"])
-
-        header(f"Creating output set: {expression}")
-        print(f"Index group      : {group_name} ({item.get('atom_count', '?')} atoms)")
-        print(f"Contains receptor: {contains_receptor}")
-        print(f"Cutdown interval : {cutdown_ps:g} ps")
-
-        structure_output = Path(f"{slug}.pdb")
-        trajectory_output = Path(f"traj_{slug}.xtc")
-
-        run(
-            gmx_command(
-                gmx, "trjconv", "-f", str(full_trajectory),
-                "-s", str(reference_tpr), "-n", str(index_file),
-                "-o", str(trajectory_output), "-quiet",
-            ),
-            selections=[group_name],
-        )
-        run(
-            gmx_command(
-                gmx, "trjconv", "-f", str(structure_file),
-                "-s", str(structure_file), "-n", str(index_file),
-                "-o", str(structure_output), "-quiet",
-            ),
-            selections=[group_name],
-        )
-
-        require_file(trajectory_output, f"{expression} trajectory")
-        require_file(structure_output, f"{expression} structure")
-        log.record(f"{expression} reference PDB", structure_output)
-        log.record(f"{expression} extracted XTC", trajectory_output)
-
-        fitted_name, reduced_name = product_filenames(slug, cutdown_ps)
-
-        if contains_receptor:
-            fitted_output: Optional[Path] = Path(fitted_name)
-            reduced_output = Path(reduced_name)
-            print(f"Fitting on {fit_group}; writing {fitted_output}")
-            run(
-                gmx_command(
-                    gmx, "trjconv", "-f", str(full_trajectory),
-                    "-s", str(reference_tpr), "-n", str(index_file),
-                    "-o", str(fitted_output), "-fit", "rot+trans", "-quiet",
-                ),
-                selections=[fit_group, group_name],
-            )
-            require_file(fitted_output, f"Fitted {expression} trajectory")
-            downsample(
-                gmx, fitted_output, structure_output, reduced_output, cutdown_ps
-            )
-            log.record(f"{expression} helix-CA-fitted XTC", fitted_output)
-        else:
-            fitted_output = None
-            reduced_output = Path(
-                f"traj_{slug}_{format_interval(cutdown_ps)}ps.xtc"
-            )
-            print(f"{expression} has no receptor atoms; fitting skipped.")
-            downsample(
-                gmx, trajectory_output, structure_output, reduced_output, cutdown_ps
-            )
-
-        log.record(f"{expression} reduced XTC", reduced_output)
-
-        products.append(
-            OutputProduct(
-                expression=expression,
-                structure=structure_output,
-                trajectory=trajectory_output,
-                fitted_trajectory=fitted_output,
-                reduced_trajectory=reduced_output,
-            )
-        )
-    return products
+    return [
+        (lambda item=item: _make_output_product(
+            gmx, item, full_trajectory, reference_tpr, structure_file,
+            index_file, fit_group,
+        ))
+        for item in manifest.get("outputs", [])
+    ]
 
 
 def remove_files(paths: list[Path]) -> None:
@@ -441,10 +561,31 @@ def _run(
     )
     mindist_script = Path(setting(settings, "MINDIST_SCRIPT", "run_mindist.sh"))
     slurm_account = setting(settings, "SLURM_ACCOUNT", "naiss2025-3-21")
+    slurm_partition = setting(settings, "SLURM_PARTITION", "shared")
+    slurm_mem = setting(settings, "SLURM_MEM", "8G")
 
     remove_temporary = parse_bool(
         setting(settings, "REMOVE_TEMPORARY", "yes"), "REMOVE_TEMPORARY"
     )
+
+    # ---- speed settings (all default to the original sequential behaviour)
+    early_cutdown_ps = parse_nonnegative_float(
+        setting(settings, "EARLY_CUTDOWN_PS", "0"), "EARLY_CUTDOWN_PS"
+    )
+    if early_cutdown_ps > 0:
+        for request in output_requests:
+            check_multiple_of(
+                request.cutdown_ps, early_cutdown_ps, f"TRAJOUT {request.expression}"
+            )
+        if full_cutdown_ps > 0:
+            check_multiple_of(full_cutdown_ps, early_cutdown_ps, "FULL_CUTDOWN_PS")
+    parallel_jobs = parse_positive_int(
+        setting(settings, "PARALLEL_JOBS", "1"), "PARALLEL_JOBS"
+    )
+    temporary_dir: Optional[Path] = None
+    if "TEMPORARY_DIR" in settings:
+        temporary_dir = Path(settings["TEMPORARY_DIR"])
+        temporary_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- resolved parameter block for the log ----------------------------
     parameters: list[tuple[str, object]] = [
@@ -480,6 +621,15 @@ def _run(
         ("SLURM_ACCOUNT", slurm_account),
         ("REMOVE_TEMPORARY", remove_temporary),
         ("LOG_GMX_OUTPUT", log_gmx_output),
+        (
+            "EARLY_CUTDOWN_PS",
+            f"{early_cutdown_ps:g} (FULL_OUTPUT and extracted XTCs at this interval)"
+            if early_cutdown_ps > 0 else "0 (disabled; every frame kept)",
+        ),
+        ("PARALLEL_JOBS", parallel_jobs),
+        ("TEMPORARY_DIR", temporary_dir if temporary_dir is not None else "(next to inputs / working dir)"),
+        ("SLURM_PARTITION (mindist)", slurm_partition),
+        ("SLURM_MEM (mindist)", slurm_mem),
     ]
     for number, entry in enumerate(trajectories, start=1):
         parameters.append(
@@ -511,34 +661,47 @@ def _run(
 
     # ---- trajectory processing -------------------------------------------
     concat_inputs, segment_temporary = prepare_sequential_segments(
-        gmx, trajectories, remove_initial_ps_override
+        gmx, trajectories, remove_initial_ps_override, temporary_dir
     )
     concatenate(gmx, concat_inputs, combined_output, log)
 
     pbc_temporary = process_pbc(
-        gmx, combined_output, reference_tpr, full_output, log
+        gmx, combined_output, reference_tpr, full_output, log,
+        early_cutdown_ps, temporary_dir,
     )
-    if full_cutdown_ps > 0:
+
+    # The reduced full trajectory and every TRAJOUT set only read FULL_OUTPUT,
+    # so they are independent and may run concurrently (PARALLEL_JOBS).
+    def reduced_full() -> tuple[None, list[tuple[str, Path]]]:
         header("Creating reduced full trajectory")
         downsample(
             gmx, full_output, reference_tpr, full_cutdown_output,
             full_cutdown_ps, PBC_OUTPUT_GROUP,
         )
-        log.record("Reduced full trajectory", full_cutdown_output)
+        return None, [("Reduced full trajectory", full_cutdown_output)]
 
-    products = (
-        create_output_products(
-            gmx, full_output, reference_tpr, structure_file, index_file,
-            manifest, log,
+    tasks: list[Callable[[], tuple[Any, list[tuple[str, Path]]]]] = []
+    if full_cutdown_ps > 0:
+        tasks.append(reduced_full)
+    if output_requests:
+        tasks.extend(
+            output_product_tasks(
+                gmx, full_output, reference_tpr, structure_file, index_file,
+                manifest,
+            )
         )
-        if output_requests
-        else []
-    )
+    products: list[OutputProduct] = []
+    for result, records in run_tasks(tasks, parallel_jobs):
+        for description, path in records:
+            log.record(description, path)
+        if result is not None:
+            products.append(result)
 
     if generate_mindist:
         write_mindist_script(
             gmx, trajectories, reference_tpr, mindist_cutdown_ps,
             mindist_script, account=slurm_account,
+            partition=slurm_partition, mem=slurm_mem,
         )
         log.record("Mindist submission script", mindist_script)
 
